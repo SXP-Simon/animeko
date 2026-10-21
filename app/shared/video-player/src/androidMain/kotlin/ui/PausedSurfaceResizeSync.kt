@@ -30,7 +30,16 @@ internal class PausedSurfaceResizeSync(
 ) : SurfaceHolder.Callback, AutoCloseable {
     private var pendingSync: SurfaceSyncGroup? = null
     private var drawObserver: ViewTreeObserver? = null
-    private val drawListener = ViewTreeObserver.OnDrawListener { finishSync() }
+    private var previousWidth = surfaceView.holder.surfaceFrame.width()
+    private var previousHeight = surfaceView.holder.surfaceFrame.height()
+    private val drawListener = ViewTreeObserver.OnDrawListener {
+        val drawnSync = pendingSync
+        // OnDraw runs before dispatchDraw. Complete after the hierarchy has actually drawn,
+        // rather than making the sync ready while Compose is still recording its frame.
+        if (drawnSync != null) surfaceView.post {
+            if (pendingSync === drawnSync) finishSync()
+        }
+    }
     private val registerSync = Runnable {
         val root = surfaceView.rootSurfaceControl ?: return@Runnable
         if (!surfaceView.holder.surface.isValid || !isPaused()) return@Runnable
@@ -55,16 +64,26 @@ internal class PausedSurfaceResizeSync(
         surfaceView.holder.addCallback(this)
     }
 
-    override fun surfaceCreated(holder: SurfaceHolder) {}
+    override fun surfaceCreated(holder: SurfaceHolder) {
+        previousWidth = 0
+        previousHeight = 0
+    }
 
     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
-        if (!isPaused()) return
+        val resized = previousWidth > 0 && previousHeight > 0 &&
+                (previousWidth != width || previousHeight != height)
+        previousWidth = width
+        previousHeight = height
+        // Initial surface creation needs its first decoded buffer, not a paused-resize sync.
+        if (!resized || !isPaused()) return
         // Coalesce intermediate layouts during rotation, and register after AndroidView.layout.
         surfaceView.removeCallbacks(registerSync)
         surfaceView.post(registerSync)
     }
 
     override fun surfaceDestroyed(holder: SurfaceHolder) {
+        previousWidth = 0
+        previousHeight = 0
         clear()
     }
 

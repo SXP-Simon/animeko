@@ -12,12 +12,14 @@ package me.him188.ani.app.videoplayer.ui
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.net.Uri
+import android.os.SystemClock
 import androidx.annotation.OptIn
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
@@ -53,7 +55,6 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertSame
-import kotlin.test.assertTrue
 
 /**
  * Run on an API 34 emulator to cover androidx/media#1237, and on newer Android as a smoke test.
@@ -76,6 +77,7 @@ class PausedVideoResizeTest {
         val firstFrame = AtomicBoolean()
         lateinit var player: ExoPlayerMediampPlayer
         var viewport = Rect.Zero
+        var buttonBounds = Rect.Zero
         var fullscreen by mutableStateOf(false)
         setContent {
             val context = LocalContext.current
@@ -92,7 +94,8 @@ class PausedVideoResizeTest {
                     }
                 })
                 player.impl.setMediaItem(MediaItem.fromUri(Uri.fromFile(mediaFile)))
-                // Preparing without play() renders the first frame and keeps the position fixed.
+                // Decode multiple frames before pausing, matching a user pausing active playback.
+                player.impl.playWhenReady = true
                 player.impl.prepare()
                 onDispose { player.close() }
             }
@@ -106,46 +109,72 @@ class PausedVideoResizeTest {
                     )
                     Button(
                         onClick = { fullscreen = !fullscreen },
-                        modifier = Modifier.align(Alignment.BottomCenter).testTag("fullscreen"),
+                        colors = ButtonDefaults.buttonColors(containerColor = ComposeColor.Magenta),
+                        modifier = Modifier.align(Alignment.BottomCenter).testTag("fullscreen")
+                            .onGloballyPositioned { buttonBounds = it.boundsInWindow() },
                     ) { Text("Fullscreen") }
                 }
             }
         }
         waitUntil(timeoutMillis = 15_000) { firstFrame.get() }
         runOnIdle { assertEquals(Player.STATE_READY, player.impl.playbackState) }
-        var position = runOnIdle { player.impl.currentPosition }
+        fun pauseAndReadPosition(): Long {
+            runOnIdle { player.impl.pause() }
+            // The playback thread can report its final milliseconds after pause() returns.
+            var lastPosition = -1L
+            var stableSince = SystemClock.uptimeMillis()
+            waitUntil(timeoutMillis = 5_000) {
+                val current = runOnIdle { player.impl.currentPosition }
+                if (current != lastPosition) {
+                    lastPosition = current
+                    stableSince = SystemClock.uptimeMillis()
+                }
+                SystemClock.uptimeMillis() - stableSince >= 200
+            }
+            return lastPosition
+        }
+        waitUntil(timeoutMillis = 10_000) { runOnIdle { player.impl.currentPosition > 200 } }
+        var position = pauseAndReadPosition()
         val surface = runOnIdle { checkNotNull(player.findAndroidVideoSurface()) }
         var captureIndex = 0
 
         fun assertPausedPicture() {
             waitForIdle()
             val bounds = runOnIdle { viewport }
+            val controls = runOnIdle { buttonBounds }
             // FIT preserves the clip's 16:9 aspect within both viewports.
             val width = minOf(bounds.width, bounds.height * 16f / 9f)
             val height = width * 9f / 16f
             val left = bounds.center.x - width / 2
             val top = bounds.center.y - height / 2
-            val screenshot = checkNotNull(instrumentation.uiAutomation.takeScreenshot())
-            try {
-                // Retain actual SurfaceFlinger output for visual verification, including failures.
-                File(instrumentation.targetContext.getExternalFilesDir(null), "paused-resize-${captureIndex++}.png")
-                    .outputStream().use { screenshot.compress(Bitmap.CompressFormat.PNG, 100, it) }
-                for ((x, y, expected) in listOf(
-                    Triple(0.2f, 0.2f, Color.RED),
-                    Triple(0.8f, 0.2f, Color.GREEN),
-                    Triple(0.2f, 0.8f, Color.BLUE),
-                    Triple(0.8f, 0.8f, Color.YELLOW),
-                )) {
-                    val actual = screenshot.getPixel((left + x * width).roundToInt(), (top + y * height).roundToInt())
-                    assertTrue(
+            val captureFile = File(
+                instrumentation.targetContext.getExternalFilesDir(null), "paused-resize-${captureIndex++}.png",
+            )
+            // Compose idleness and onRenderedFirstFrame do not wait for SurfaceFlinger to
+            // present the frame. Allow its asynchronous transaction to complete while paused.
+            waitUntil("paused video aligns with viewport at fullscreen=$fullscreen", timeoutMillis = 5_000) {
+                val screenshot = instrumentation.uiAutomation.takeScreenshot() ?: return@waitUntil false
+                try {
+                    captureFile.outputStream().use { screenshot.compress(Bitmap.CompressFormat.PNG, 100, it) }
+                    val chromePixel = screenshot.getPixel(
+                        controls.center.x.roundToInt(), (controls.top + controls.height * 0.2f).roundToInt(),
+                    )
+                    val chromeVisible = Color.red(chromePixel) > 200 && Color.blue(chromePixel) > 200 &&
+                            Color.green(chromePixel) < 40
+                    chromeVisible && listOf(
+                        Triple(0.2f, 0.2f, Color.RED),
+                        Triple(0.8f, 0.2f, Color.GREEN),
+                        Triple(0.2f, 0.8f, Color.BLUE),
+                        Triple(0.8f, 0.8f, Color.YELLOW),
+                    ).all { (x, y, expected) ->
+                        val actual = screenshot.getPixel((left + x * width).roundToInt(), (top + y * height).roundToInt())
                         abs(Color.red(actual) - Color.red(expected)) < 40 &&
                                 abs(Color.green(actual) - Color.green(expected)) < 40 &&
-                                abs(Color.blue(actual) - Color.blue(expected)) < 40,
-                        "Paused quadrant ($x, $y) is misplaced at fullscreen=$fullscreen: $actual",
-                    )
+                                abs(Color.blue(actual) - Color.blue(expected)) < 40
+                    }
+                } finally {
+                    screenshot.recycle()
                 }
-            } finally {
-                screenshot.recycle()
             }
             runOnIdle {
                 assertSame(surface, player.findAndroidVideoSurface(), "Resizing must preserve the video surface")
@@ -162,13 +191,10 @@ class PausedVideoResizeTest {
             onNodeWithTag("fullscreen").performClick()
             assertPausedPicture()
         }
-        // Also cover the reported case: pause an already-playing video, then resize both ways.
+        // Resume after resizing, then pause and repeat both directions.
         runOnIdle { player.impl.play() }
-        waitUntil(timeoutMillis = 10_000) { runOnIdle { player.impl.currentPosition > 200 } }
-        runOnIdle {
-            player.impl.pause()
-            position = player.impl.currentPosition
-        }
+        waitUntil(timeoutMillis = 10_000) { runOnIdle { player.impl.currentPosition > position + 200 } }
+        position = pauseAndReadPosition()
         onNodeWithTag("fullscreen").performClick()
         assertPausedPicture()
         onNodeWithTag("fullscreen").performClick()

@@ -15,6 +15,7 @@ Android 播放器暂停后进入或退出全屏，Compose 控件已经使用新�
   `setEnableComposeSurfaceSyncWorkaround(true)`，覆盖 Media3 内部针对 API 34 的兼容处理。
 - API 35 及以上，`PausedSurfaceResizeSync` 监听实际 Surface 尺寸变化；暂停时将窗口的下一次绘制纳入
   SurfaceSyncGroup，并提交一个绘制事务，使静止的视频层与 Compose 界面一起更新。
+  忽略首次 Surface 创建与重复尺寸通知；视图层级完成本次绘制后才结束同步。
   多次中间尺寸变更合并到主线程的一个请求；销毁、释放时取消请求并结束未完成的同步组。
 - 不通过恢复播放、seek 或重建播放器获取新帧，避免改变播放状态、进度或引发重新缓冲。
 
@@ -43,8 +44,10 @@ Media3 的开关只在 API 34 执行，不能把它当作 Android 15 的修复�
 
 `PausedVideoResizeTest` 使用本地四色 H.264 视频和真实 ExoPlayer。合成点击反复切换视口尺寸，
 检查系统截图中的四色位置，而不是只断言 Compose 节点或 SurfaceView 的 bounds。
-同时检查播放器仍处于暂停、位置不变、没有替换 Surface。
-分别覆盖 prepare 后未开始播放，以及实际播放后暂停的情况。
+同时检查控制按钮正常呈现、播放器仍处于暂停、位置不变、没有替换 SurfaceView。
+覆盖实际播放后暂停、反复切换尺寸，以及恢复播放后再次暂停再切换的情况。
+不把 prepare 后从未播放的首帧作为测试基准：API 35 模拟器上此路径存在间歇性黑屏，
+与本测试要求的“已呈现的暂停帧随视口变化”分开记录，尚未确认其根因。
 
 测试截图写入测试目标包 external files 下的 `paused-resize-*.png`，便于失败后检查。
 在 API 34 运行可覆盖 Media3 自带修复，在 API 35+ 运行可覆盖额外同步路径。
@@ -52,5 +55,16 @@ Media3 的开关只在 API 34 执行，不能把它当作 Android 15 的修复�
 
 ```shell
 ./gradlew :app:shared:video-player:connectedAndroidDeviceTest \
+  -Pandroid.min.sdk=30 \
   -Pandroid.testInstrumentationRunnerArguments.class=me.him188.ani.app.videoplayer.ui.PausedVideoResizeTest
 ```
+
+`android.min.sdk=30` 仅用于本地测试构建，避免模块中已有的带空格测试名无法转换为旧版 DEX；
+参见[测试指南](../testing.md#android-instrumented-test)。产品默认最低 SDK 不变。
+
+2026-10-21 验证结果：API 34 / Android 14、API 35 / Android 15 的 x86_64 模拟器均通过上述组件回归。
+测试直接使用真实 ExoPlayer 与 VideoPlayer，合成输入切换 160×90dp / 280×200dp 视口。
+这不替代完整播放页的横竖屏测试，也不替代报告设备上的厂商系统验证。
+
+Gradle 设备测试结束后可能卸载测试包并删除其 external files；需要保留截图时，可直接通过
+`adb shell am instrument` 执行同一测试，再从测试包的 external files 拉取截图。
