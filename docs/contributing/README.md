@@ -33,6 +33,7 @@
 - [Android TV 加载占位](code/android-tv-loading.md)
 - [播放器键盘与焦点](code/player-keyboard.md)
 - [播放器截图](code/player-screenshot.md)
+- [暂停画面与全屏尺寸同步](code/player-surface-resize.md)
 - [Media Framework](code/media-framework.md)
     - [MediaSource](code/media/media-source.md)
     - [MediaSelector](code/media/media-selector.md)
